@@ -167,6 +167,10 @@ var LANG = {
         stp_ctrx: "TC received",
         stp_cttx: "TC sent",
         stp_cage: "Last BPDU [s]",
+        lldp_c_tx: "TX",
+        lldp_c_rx: "RX",
+        lldp_c_disc: "Discarded",
+        lldp_c_age: "Age-outs",
         lldp_nb_title: "Neighbours",
         lldp_nb_chassis: "Chassis ID",
         lldp_nb_portid: "Port ID",
@@ -182,6 +186,8 @@ var LANG = {
         lldp_w_lag: "LAG only on one side",
         lldp_w_dup: "same neighbour on another port",
         lldp_nb_ttl: "TTL",
+        lldp_nb_seen: "Last seen",
+        lldp_s_ago: "{s} s ago",
         st_title: "Port statistics",
         st_h: "totals since boot",
         st_txg: "TX good",
@@ -4502,6 +4508,10 @@ function lldpLoad() {
         $("lldp_en").checked = s.on;
         var tb = $("lldp_table").tBodies[0];
         tb.innerHTML = "";
+        var cnt = {};
+        (s.counters || []).forEach(function(c) {
+            cnt[c.port] = c
+        });
         byPort(s.portStatus).forEach(function(p) {
             var tr = tb.insertRow();
             tr.insertCell().textContent = p.port;
@@ -4521,6 +4531,10 @@ function lldpLoad() {
             ]);
             sw.firstChild.checked = p.permitted;
             tr.insertCell().appendChild(sw);
+            var c = cnt[p.port] || {};
+            ["tx", "rx", "discarded", "ageouts"].forEach(function(k) {
+                tr.insertCell().textContent = c[k] == null ? "-" : c[k]
+            });
         });
         var nb = $("lldp_nb_table").tBodies[0];
         nb.innerHTML = "";
@@ -4556,6 +4570,9 @@ function lldpLoad() {
                 }));
             });
             tr.insertCell().textContent = n.ttl;
+            tr.insertCell().textContent = n.age == null ? "-" : t("lldp_s_ago", {
+                s: n.age
+            });
         });
     });
 }

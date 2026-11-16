@@ -702,6 +702,7 @@ void send_lldp(void)
 			char_to_html(',');
 	}
 	char_to_html(']');
+	lldp_counters_to_html();
 	lldp_neighbors_to_html();
 	char_to_html('}');
 }

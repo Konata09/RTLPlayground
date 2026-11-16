@@ -26,9 +26,21 @@ uint8_t sfr_data[4];
 
 static uint32_t links_sts;
 static int reg_reads, tx_frames, tx_port[16];
+static char lldp_logbuf[1024];
+static size_t lldp_loglen;
 
-void print_string(const char *s) { (void)s; }
-void write_char(char c) { (void)c; }
+void print_string(const char *s)
+{
+	while (*s && lldp_loglen + 1 < sizeof(lldp_logbuf))
+		lldp_logbuf[lldp_loglen++] = *s++;
+	lldp_logbuf[lldp_loglen] = 0;
+}
+void write_char(char c)
+{
+	if (lldp_loglen + 1 < sizeof(lldp_logbuf))
+		lldp_logbuf[lldp_loglen++] = c;
+	lldp_logbuf[lldp_loglen] = 0;
+}
 void tcpip_output(void)
 {
 	uint16_t m = HTONS(((struct rtl_tag *)&uip_buf[RTL_FRAME_DESC_SIZE + 2 * MAC_ADDR_LEN])->pmask);
@@ -119,6 +131,33 @@ static void reset(bool enabled, uint16_t links)
 	links_sts = links;
 	reg_reads = tx_frames = 0;
 	memset(tx_port, 0, sizeof(tx_port));
+	lldp_loglen = 0;
+	lldp_logbuf[0] = 0;
+}
+
+static bool frame_no_chassis(uint8_t port, uint16_t ttl)
+{
+	uint8_t *p = uip_buf;
+
+	memset(uip_buf, 0, sizeof(uip_buf));
+	memcpy(p, LLDP_MULTICAST_ADDR, MAC_ADDR_LEN);
+	p = uip_buf + TRAP_RX_HDR_SIZE - 1;
+	*p++ = port;
+	*p++ = LLDP_ETHERTYPE >> 8;
+	*p++ = LLDP_ETHERTYPE & 0xff;
+	*p++ = LLDP_PORT_ID_TLV_TYPE << 1;
+	*p++ = 5;
+	*p++ = LLDP_PORT_ID_TLV_SUBTYPE;
+	memcpy(p, "eth0", 4);
+	p += 4;
+	*p++ = LLDP_TTL_TLV_TYPE << 1;
+	*p++ = LLDP_TTL_TLV_LENGTH;
+	*p++ = ttl >> 8;
+	*p++ = ttl & 0xff;
+	*p++ = 0;
+	*p++ = 0;
+	uip_len = p - uip_buf;
+	return lldp_in();
 }
 
 int main(void)
@@ -222,6 +261,58 @@ int main(void)
 	step(LLDP_FAST_TX_COUNT);
 	CHECK(lldp_nb[0].port == 3 && tx_port[3] == 1,
 	      "L16 a neighbour that pushes the oldest out of a full table gets no fast frames");
+	CHECK(strstr(lldp_logbuf, "LLDP: neighbour evicted on port 9:") && strstr(lldp_logbuf, "LLDP: neighbour found on port 4:  (eth0)"),
+	      "L17 full table eviction logs both evicted and found events");
+
+	reset(true, 0x0010);
+	frame(4, LLDP_CHASSIS_ID_TLV_SUBTYPE, (const char *)ap_mac, MAC_ADDR_LEN, LLDP_PORT_ID_SUBTYPE_MAC, (const char *)ap_mac, MAC_ADDR_LEN);
+	CHECK(strstr(lldp_logbuf, "LLDP: neighbour found on port 5:  (94:2a:6f:d2:25:6e)"),
+	      "L18 neighbour found log formats MAC port IDs safely");
+	step(7);
+	slen = 0;
+	lldp_neighbors_to_html();
+	outbuf[slen] = 0;
+	CHECK(lldp_uptime_s - lldp_nb[0].seen == 7 && strstr((char *)outbuf, "\"age\":7"),
+	      "L19 last-seen age counts elapsed seconds in /lldp.json");
+	frame(4, LLDP_CHASSIS_ID_TLV_SUBTYPE, (const char *)ap_mac, MAC_ADDR_LEN, LLDP_PORT_ID_SUBTYPE_MAC, (const char *)ap_mac, MAC_ADDR_LEN);
+	CHECK(lldp_uptime_s - lldp_nb[0].seen == 0, "L20 frame refresh resets last-seen age to 0");
+
+	frame_no_chassis(4, 120);
+	lldp_nb[0].ttl = 1;
+	lldp_loglen = 0; lldp_logbuf[0] = 0;
+	step(1);
+	CHECK(lldp_cnt[4].rx == 3 && lldp_cnt[4].discarded == 1 && lldp_cnt[4].ageouts == 1 && lldp_cnt[4].tx > 0
+	      && strstr(lldp_logbuf, "LLDP: neighbour expired on port 5:"),
+	      "L21 counters track tx/rx/discarded/ageouts and expiry is logged");
+	slen = 0;
+	lldp_counters_to_html();
+	outbuf[slen] = 0;
+	CHECK(strstr((char *)outbuf, "\"counters\":[") && strstr((char *)outbuf, "\"discarded\":1,\"ageouts\":1"),
+	      "L22 lldp_counters_to_html emits counters JSON");
+
+	lldp_loglen = 0; lldp_logbuf[0] = 0;
+	frame(4, LLDP_CHASSIS_ID_TLV_SUBTYPE, (const char *)ap_mac, MAC_ADDR_LEN, LLDP_PORT_ID_SUBTYPE_MAC, (const char *)ap_mac, MAC_ADDR_LEN);
+	lldp_loglen = 0; lldp_logbuf[0] = 0;
+	/* Trigger shutdown TTL=0 */
+	memset(uip_buf, 0, sizeof(uip_buf));
+	{
+		uint8_t *p = uip_buf + TRAP_RX_HDR_SIZE - 1;
+		memcpy(uip_buf, LLDP_MULTICAST_ADDR, MAC_ADDR_LEN);
+		*p++ = 4; *p++ = LLDP_ETHERTYPE >> 8; *p++ = LLDP_ETHERTYPE & 0xff;
+		*p++ = LLDP_CHASSIS_ID_TLV_TYPE << 1; *p++ = 7; *p++ = LLDP_CHASSIS_ID_TLV_SUBTYPE;
+		memcpy(p, ap_mac, 6); p += 6;
+		*p++ = LLDP_PORT_ID_TLV_TYPE << 1; *p++ = 7; *p++ = LLDP_PORT_ID_SUBTYPE_MAC;
+		memcpy(p, ap_mac, 6); p += 6;
+		*p++ = LLDP_TTL_TLV_TYPE << 1; *p++ = 2; *p++ = 0; *p++ = 0;
+		*p++ = 0; *p++ = 0;
+		uip_len = p - uip_buf;
+	}
+	lldp_in();
+	CHECK(lldp_nb[0].ttl == 0 && strstr(lldp_logbuf, "LLDP: neighbour gone on port 5:"),
+	      "L23 TTL=0 frame clears neighbour and logs gone");
+	lldp_init();
+	CHECK(lldp_cnt[4].rx == 0 && lldp_cnt[4].tx == 0 && lldp_cnt[4].discarded == 0 && lldp_cnt[4].ageouts == 0,
+	      "L24 lldp_init clears port counters");
 
 	printf("\n%s (%d failure%s)\n", failures ? "SANDBOX: FAILURES" : "SANDBOX: ALL PASS",
 	       failures, failures == 1 ? "" : "s");

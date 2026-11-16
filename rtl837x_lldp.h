@@ -107,7 +107,7 @@
 #define LLDP_WARN_AGG 0x02
 #define LLDP_WARN_DUPLICATE 0x04
 #define PORT_MAX_LEN_MASK 0x3fff
-#define LLDP_NB_JSON_LENGTH 226	/* separator + worst-case neighbour entry in /lldp.json */
+#define LLDP_NB_JSON_LENGTH 238	/* separator + worst-case neighbour entry in /lldp.json */
 
 struct lldp_neighbor {
     uint8_t port;		/* logical ingress port */
@@ -125,15 +125,31 @@ struct lldp_neighbor {
     uint8_t agg;		/* 802.3 Link Aggregation status, LLDP_AGG_* bits */
     uint8_t warn;		/* LLDP_WARN_* bits as of the last frame */
     uint16_t ttl;		/* seconds until the entry expires, 0 = free slot */
+    uint16_t seen;		/* lldp_uptime_s when the last frame arrived */
 };
 
+extern __xdata uint16_t lldp_uptime_s;
+
 extern __xdata struct lldp_neighbor lldp_nb[LLDP_NB_MAX];
+
+#define LLDP_PORTS 10
+
+struct lldp_port_counters {
+    uint16_t tx;		/* LLDPDUs sent on the port */
+    uint16_t rx;		/* LLDPDUs received on the port */
+    uint16_t discarded;	/* received frames without a usable Chassis ID */
+    uint16_t ageouts;	/* neighbours expired on the port */
+};
+
+extern __xdata struct lldp_port_counters lldp_cnt[LLDP_PORTS];
 
 void lldp_init(void) __banked;
 void lldp_tick(void) __banked;
 void lldp_shutdown(uint16_t ports) __banked;
 bool lldp_in(void) __banked;
 void lldp_neighbors_to_html(void) __banked;
+void lldp_counters_to_html(void) __banked;
+void lldp_counters(void) __banked;
 void lldp_show(void) __banked;
 uint8_t lldp_neighbor_count(void) __banked;
 void lldp_set_addresses(void) __banked;
