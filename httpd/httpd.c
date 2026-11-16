@@ -9,6 +9,9 @@
 #include "timer.h"
 #include "sessions.h"
 #include "html_data.h"
+#ifdef SNMP
+#include "snmp.h"
+#endif
 
 // #define DEBUG
 #include "debug.h"
@@ -965,7 +968,7 @@ void httpd_appcall(void)
 		uint16_t body_off = 0;
 		// Mark end of request header with \0
 		p[uip_len] = 0;
-#ifdef DEBUG
+#if defined(DEBUG) && !defined(SNMP)
 		while (*p)
 			dbg_char(*p++);
 		dbg_char('\n');
@@ -1059,6 +1062,10 @@ void httpd_appcall(void)
 				send_stp_counters();
 			} else if (is_word(q, "/vlanlist.json")) {
 				send_vlanlist();
+#ifdef SNMP
+			} else if (is_word(q, "/snmp_config")) {
+				snmp_export_config();
+#endif
 			} else if (is_word(q, "/config")) {
 				send_config();
 			} else if (is_word(q, "/cmd_log")) {

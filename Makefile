@@ -59,6 +59,10 @@ endif
 # The board definition being built: one file per MACHINE_* symbol in machine.h.
 MACHINE_SRC = machine/$(MACHINE).c
 
+ifeq ($(SNMP),1)
+CC_FLAGS += -DSNMP
+endif
+
 MACHINE_INIT_DEFAULT := machine/default_machine_init.c
 MACHINE_INIT_SRC := $(wildcard machine/$(MACHINE)_init.c)
 ifeq ($(MACHINE_INIT_SRC),)
@@ -192,6 +196,10 @@ SRCS += \
 	uip/uip-neighbor.c \
 	uip/uip-split.c
 
+ifeq ($(SNMP),1)
+SRCS += snmp.c snmp_hw.c snmp_control.c
+endif
+
 OBJS = ${SRCS:%.c=$(BUILDDIR)/%.rel}
 DEPS := ${SRCS:%.c=$(BUILDDIR)/%.d}
 HTML := $(shell find html -name '*.html' -or -name '*.svg' -or -name '*.css' -or -name '*.ico')
@@ -281,7 +289,7 @@ $(BUILDDIR)/rtlplayground.ihx: $(OBJS) $(BUILDDIR)/crtbank.rel $(BUILDDIR)/crc16
 $(BUILDDIR)/rtlplayground.img: $(BUILDDIR)/rtlplayground.ihx
 	objcopy --input-target=ihex -O binary $< $@
 
-$(OUTPUT): $(BUILDDIR)/rtlplayground.img $(CONFIG) $(CONFIG_STAMP) | tools
+$(OUTPUT): $(BUILDDIR)/rtlplayground.img $(CONFIG) $(CONFIG_STAMP) test/check_banked_calls.py | tools
 	@mkdir -p "$(dir $@)"
 	if [ -e "$@" ]; then rm "$@"; fi
 	tools/$(BUILDDIR)/imagebuilder -i $(BUILDDIR)/rtlplayground.img "$@"
@@ -289,6 +297,7 @@ $(OUTPUT): $(BUILDDIR)/rtlplayground.img $(CONFIG) $(CONFIG_STAMP) | tools
 	tools/$(BUILDDIR)/fileadder -a $(CONFIG_LOCATION) -s $(IMAGESIZE) -l $(IMAGESIZE) -d "$(CONFIG)" "$@"
 	tools/$(BUILDDIR)/fileadder -a $(HTML_LOCATION) -s $(IMAGESIZE) -l $(DEFAULT_CONFIG_LOCATION) -z -d $(HTML_MIN) -b BANK1 "$@"
 	tools/$(BUILDDIR)/crc_calculator -u "$@"
+	python3 test/check_banked_calls.py $(BUILDDIR) --image $@
 	if [ "$(OUTPUT)" = "$(BUILDDIR)/rtlplayground-$(FILENAME_EXTENSION).bin" ]; then \
 		ln -sf $(MACHINE)/rtlplayground-$(FILENAME_EXTENSION).bin "$(BUILDDIR)/../rtlplayground.bin"; \
 	fi

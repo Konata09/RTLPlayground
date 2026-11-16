@@ -1,3 +1,4 @@
+#include "uip/uip_rx.h"
 #include <8051.h>
 #include <stdint.h>
 
@@ -91,6 +92,10 @@ __code const uint8_t netmask[] = { 255, 255, 255, 0};
 __xdata struct uip_eth_addr uip_ethaddr;
 
 volatile __xdata uint32_t ticks;
+#ifdef SNMP
+#include "snmp.h"
+extern volatile __xdata uint32_t snmp_uptime;
+#endif
 __xdata uint8_t arp_age_secs;
 extern __xdata struct dhcp_state dhcp_state;
 
@@ -209,6 +214,9 @@ void isr_timer0(void) __interrupt(1)
 void isr_timer2(void) __interrupt(5)
 {
 	ticks++;
+#ifdef SNMP
+    if (!(ticks & 1)) snmp_uptime++;
+#endif
 	tick_pending = 1;
 
 	// Clear TF2 & EXF2 by software
@@ -995,8 +1003,7 @@ void handle_rx(void)
 			}
 		} else if (ETH_IN->ether_type == HTONS(0x0800)) { // IPv4
 			if (!management_vlan || management_vlan == rx_packet_vlan) {
-				uip_arp_ipin();
-				uip_input();
+				uip_rx_ip_input();
 				if (uip_len) {
 					// Add ethernet frame
 					uip_arp_out();
@@ -1719,6 +1726,9 @@ void main(void)
 	bandwidth_setup();
 	uip_init();
 	uip_arp_init();
+#ifdef SNMP
+    snmp_init();
+#endif
 	httpd_init();
 	lldp_init();
 
