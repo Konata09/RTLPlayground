@@ -4,8 +4,8 @@
 #include "machine.h"
 #include "snmp_hw.h"
 
-#pragma codeseg BANK3
-#pragma constseg BANK3
+#pragma codeseg BANK4
+#pragma constseg BANK4
 
 extern __code const struct machine machine;
 /* Set when a statistics request timed out: its selector may still be pending.
@@ -182,8 +182,8 @@ bool snmp_hw_speed(uint8_t port, __xdata uint16_t *__xdata mbps) __banked
 	if (!snmp_hw_link(port, &links))
 		return false;
 	*mbps = 0;
-	/* snmp_hw_link() has already validated the MAC port range 0..8. */
-	if (!(links & ((uint16_t)1 << port)))
+	/* snmp_hw_link() has already validated the MAC port range 0..8 and returns a 16-bit mask. */
+	if (!((uint16_t)links & ((uint16_t)1 << port)))
 		return true;
 	if (!access(port < 8 ? RTL837X_REG_LINKS : RTL837X_REG_LINKS_89, SFR_EXEC_READ_REG))
 		return false;

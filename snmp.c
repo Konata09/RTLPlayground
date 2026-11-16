@@ -12,8 +12,8 @@ extern bool EA;
 #include "snmp.h"
 #include "snmp_internal.h"
 #include "snmp_hw.h"
-#pragma codeseg BANK3
-#pragma constseg BANK3
+#pragma codeseg BANK4
+#pragma constseg BANK4
 extern __code const struct machine machine;
 __xdata uint8_t snmp_response[SNMP_MAX_MESSAGE];
 volatile __xdata uint32_t snmp_uptime;
@@ -50,7 +50,7 @@ void snmp_init(void) __banked
 	memset(snmp_network, 0, 4);
 	memset(snmp_mask, 0, 4);
 	{
-		bool enabled = EA;
+		__xdata uint8_t enabled = EA;
 		EA = 0;
 		snmp_uptime = 0;
 		EA = enabled;

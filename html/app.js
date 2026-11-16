@@ -73,6 +73,7 @@ var LANG = {
         i_temp: "Temperature",
         i_flash: "Flash",
         i_syslog: "Syslog",
+        i_lldp: "LLDP neighbours",
         p_state: "State",
         p_disabled: "disabled",
         p_up: "up",
@@ -166,6 +167,21 @@ var LANG = {
         stp_ctrx: "TC received",
         stp_cttx: "TC sent",
         stp_cage: "Last BPDU [s]",
+        lldp_nb_title: "Neighbours",
+        lldp_nb_chassis: "Chassis ID",
+        lldp_nb_portid: "Port ID",
+        lldp_nb_sysname: "System Name",
+        lldp_nb_portdesc: "Port Description",
+        lldp_nb_addr: "Address",
+        lldp_nb_caps: "Capabilities",
+        lldp_nb_pvid: "PVID",
+        lldp_nb_mtu: "MTU",
+        lldp_nb_lag: "LAG",
+        lldp_nb_warn: "Warnings",
+        lldp_w_mtu: "MTU larger than ours",
+        lldp_w_lag: "LAG only on one side",
+        lldp_w_dup: "same neighbour on another port",
+        lldp_nb_ttl: "TTL",
         st_title: "Port statistics",
         st_h: "totals since boot",
         st_txg: "TX good",
@@ -766,6 +782,7 @@ var LANG = {
         i_temp: "温度",
         i_flash: "Flash",
         i_syslog: "Syslog",
+        i_lldp: "LLDP neighbours",
         p_state: "状态",
         p_disabled: "已禁用",
         p_up: "已连接",
@@ -1148,6 +1165,7 @@ var LANG = {
         i_pcb: "PCB",
         i_flash: "Flash",
         i_syslog: "Syslog",
+        i_lldp: "LLDP neighbours",
         p_state: "Estado",
         p_disabled: "deshabilitado",
         p_up: "activo",
@@ -1886,6 +1904,7 @@ var LANG = {
         i_temp: "Temperatur",
         i_flash: "Flash",
         i_syslog: "Syslog",
+        i_lldp: "LLDP neighbours",
         p_state: "Zustand",
         p_disabled: "deaktiviert",
         p_up: "verbunden",
@@ -2899,7 +2918,8 @@ function renderInfo() {
         ["i_pcb", "pcb_ver"],
         ["i_temp", "chip_temp"],
         ["i_flash", "flash_size"],
-        ["i_syslog", "syslog_server"]
+        ["i_syslog", "syslog_server"],
+        ["i_lldp", "lldp_neighbors"]
     ];
     var tb = $("sysinfo");
     tb.innerHTML = "";
@@ -3094,11 +3114,32 @@ function applyPort(i) {
     }
     postCmds(cmds).catch(function() {});
 }
+var lldpTipT = 0;
+
+function portsLldp() {
+    lldpTipT = Date.now();
+    return getJSON("/lldp.json").then(function(s) {
+        var tip = {};
+        (s.neighbors || []).forEach(function(n) {
+            tip[n.port] = (tip[n.port] ? tip[n.port] + "\n" : "") + (n.sysName || n.chassis) + " (" + n.portId + ")";
+        });
+        S.ports.forEach(function(p) {
+            var el = $("plink" + (p.port - 1));
+            if (el) el.title = tip[p.port] ? "LLDP: " + tip[p.port] : "";
+        });
+    }).catch(function() {});
+}
 tabHooks.ports = {
     enter: function() {
-        needPorts(buildPorts)
+        needPorts(function() {
+            buildPorts();
+            portsLldp();
+        });
     },
-    status: portsStatus,
+    status: function() {
+        portsStatus();
+        if (Date.now() - lldpTipT > 30000) portsLldp();
+    },
 };
 
 var STP_PF = {
@@ -4437,6 +4478,25 @@ tabHooks.lag = {
     }
 };
 
+var LLDP_CAPS = [
+    [1, "Other"],
+    [2, "Repeater"],
+    [4, "Bridge"],
+    [8, "WLAN AP"],
+    [16, "Router"],
+    [32, "Telephone"],
+    [64, "DOCSIS"],
+    [128, "Station"]
+];
+
+function lldpCaps(c) {
+    return LLDP_CAPS.filter(function(x) {
+        return c & x[0]
+    }).map(function(x) {
+        return x[1]
+    }).join(", ")
+}
+
 function lldpLoad() {
     return getJSON("/lldp.json").then(function(s) {
         $("lldp_en").checked = s.on;
@@ -4462,6 +4522,41 @@ function lldpLoad() {
             sw.firstChild.checked = p.permitted;
             tr.insertCell().appendChild(sw);
         });
+        var nb = $("lldp_nb_table").tBodies[0];
+        nb.innerHTML = "";
+        (s.neighbors || []).sort(function(a, b) {
+            return a.port - b.port
+        }).forEach(function(n) {
+            var tr = nb.insertRow();
+            tr.insertCell().textContent = n.port;
+            tr.insertCell().textContent = n.chassis;
+            tr.insertCell().textContent = n.portId;
+            tr.insertCell().textContent = n.sysName;
+            tr.insertCell().textContent = n.portDesc || "";
+            var ac = tr.insertCell();
+            if (n.mgmtAddr) ac.appendChild(h("a", {
+                href: "http://" + n.mgmtAddr,
+                target: "_blank",
+                rel: "noopener",
+                text: n.mgmtAddr
+            }));
+            tr.insertCell().textContent = lldpCaps(n.caps);
+            tr.insertCell().textContent = n.pvid || "-";
+            tr.insertCell().textContent = n.mtu || "-";
+            tr.insertCell().textContent = n.agg ? (n.agg === 2 ? t("c_yes") : t("c_no")) : "-";
+            var wc = tr.insertCell();
+            [
+                [1, "lldp_w_mtu"],
+                [2, "lldp_w_lag"],
+                [4, "lldp_w_dup"]
+            ].forEach(function(w) {
+                if (n.warn & w[0]) wc.appendChild(h("span", {
+                    class: "badge bad",
+                    text: t(w[1])
+                }));
+            });
+            tr.insertCell().textContent = n.ttl;
+        });
     });
 }
 
@@ -4471,8 +4566,14 @@ $("lldp_en").addEventListener("change", function() {
         el.checked = !el.checked
     });
 });
+var lldpPoller = new Poller(lldpLoad, 5000);
 tabHooks.lldp = {
-    enter: lldpLoad
+    enter: function() {
+        lldpPoller.start()
+    },
+    leave: function() {
+        lldpPoller.stop()
+    }
 };
 
 function eeeLoad() {
