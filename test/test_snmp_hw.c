@@ -19,6 +19,7 @@
  * No production test hooks or reset-on-request paths are introduced. */
 #include "../snmp_hw.c"
 const struct machine machine = {
+    .n_sfp = 1,
     .is_sfp = {[8] = 1}}; /* logical 8 is the SFP cage; speed/link keep using LINKS_89 */
 /* Bounded request: selector write, optional busy pre-check and 32 polls, plus slack. */
 #define MAX_REQUEST_COMMANDS 40
@@ -26,6 +27,20 @@ static uint32_t link_register = 0x00080000, speed_register = 5u << 12;
 static uint32_t sfp_speed_register;
 static uint16_t a610[9] = {0x2058, 0x2058, 0x2058, 0x2058, 0x2058,
 			   0x2058, 0x2058, 0x2058, 0x2058};
+static uint16_t physr[9] = {0x002c, 0x002c, 0x002c, 0x002c, 0x002c,
+			    0x002c, 0x002c, 0x002c, 0x002c};
+static uint16_t mtu_reg[9] = {0xffff, 0xc5ea, 0x05ee, 0x2328, 0x3fff,
+			      0x05ee, 0x05ee, 0x05ee, 0x3fff};
+static int16_t temp_reg = 6362; /* ~49.7 C in 1/128 C */
+static uint16_t sfp_ddm_val[2][256];
+static bool sfp_ddm_fail;
+bool snmp_hw_sfp_read(uint8_t sfp, uint8_t reg, uint16_t *raw)
+{
+	if (sfp_ddm_fail)
+		return false;
+	*raw = sfp_ddm_val[sfp][reg];
+	return true;
+}
 static unsigned commands, selectors, smi_reads, stick_at;
 static bool stuck_sfr, stuck_selector, selector_inflight, advance_live, seen_high;
 static bool native_order = true, pending;
@@ -77,14 +92,17 @@ void snmp_hw_command(uint16_t reg, uint8_t command)
 	SFR_EXEC_STATUS = 0;
 	if (command == SFR_EXEC_READ_SMI) {
 		uint8_t phy = SFR_SMI_PHY;
-		assert(SFR_SMI_REG_U16 == 0xa610 && SFR_SMI_DEV == ((31 << 3) | 2));
+		uint16_t val;
+		assert((SFR_SMI_REG_U16 == 0xa610 || SFR_SMI_REG_U16 == PHY_MMD31_PHYSR) &&
+		       SFR_SMI_DEV == ((31 << 3) | 2));
 		assert(phy < 9 && !machine.is_sfp[phy]);
 		smi_reads++;
 		last_smi_phy = phy;
+		val = SFR_SMI_REG_U16 == 0xa610 ? a610[phy] : physr[phy];
 		/* Host SFR aliases are independent variables; keep every view coherent. */
-		SFR_DATA_U16 = a610[phy];
-		SFR_DATA_8 = a610[phy] >> 8;
-		SFR_DATA_0 = a610[phy];
+		SFR_DATA_U16 = val;
+		SFR_DATA_8 = val >> 8;
+		SFR_DATA_0 = val;
 		return;
 	}
 	if (command == SFR_EXEC_WRITE_REG) {
@@ -111,6 +129,12 @@ void snmp_hw_command(uint16_t reg, uint8_t command)
 		word(speed_register);
 	else if (reg == RTL837X_REG_LINKS_89)
 		word(sfp_speed_register);
+	else if (reg == RTL837X_TM_RESULT)
+		word((uint16_t)temp_reg);
+	else if ((reg & 0xff) == (RTL8373_REG_MAC_L2_PORT_MAX_LEN & 0xff) &&
+		 reg >= RTL8373_REG_MAC_L2_PORT_MAX_LEN &&
+		 ((reg - RTL8373_REG_MAC_L2_PORT_MAX_LEN) >> 8) < 9)
+		word(mtu_reg[(reg - RTL8373_REG_MAC_L2_PORT_MAX_LEN) >> 8]);
 	else
 		assert(0);
 }
@@ -214,8 +238,11 @@ static void expect_busy_refusals(void)
 		sentinel(&c);
 		assert(!counter_call(kind, &c) && is_sentinel(&c));
 	}
+	uint16_t mtu;
+	int16_t temp;
 	assert(!snmp_hw_link(3, &link) && !snmp_hw_speed(3, &speed) &&
-	       !snmp_hw_admin(3, &state));
+	       !snmp_hw_admin(3, &state) && !snmp_hw_mtu(3, &mtu) &&
+	       !snmp_hw_duplex(3, &state) && !snmp_hw_temp(&temp));
 	assert(commands == c0 && selectors == s0 && smi_reads == m0 && same(&s));
 }
 static void expect_recovered(void)
@@ -444,6 +471,47 @@ int main(int argc, char **argv)
 	assert(commands == before_invalid);
 	if (MACHINE_MIN_PORT)
 		assert(!snmp_hw_link(MACHINE_MIN_PORT - 1, &link));
+	{
+		uint16_t mtu, raw;
+		uint8_t dup;
+		int16_t temp;
+		assert(snmp_hw_mtu(3, &mtu) && mtu == (mtu_reg[3] & 0x3fff));
+		assert(snmp_hw_mtu(8, &mtu) && mtu == 0x3fff);
+		assert(!snmp_hw_mtu(9, &mtu));
+		/* Duplex: link down -> 1; 2.5G copper & SFP -> 3 without SMI; 100M/1G reads PHYSR bit 3. */
+		link_register = 0;
+		assert(snmp_hw_duplex(3, &dup) && dup == 1);
+		link_register = 0x00080000;
+		speed_register = 5u << 12; /* 2.5G */
+		unsigned smi0 = smi_reads;
+		assert(snmp_hw_duplex(3, &dup) && dup == 3 && smi_reads == smi0);
+		speed_register = 1u << 12; /* 100M */
+		physr[3] = 0x0014; /* half duplex (bit 3 clear) */
+		assert(snmp_hw_duplex(3, &dup) && dup == 2 && smi_reads == smi0 + 1);
+		physr[3] = 0x001c; /* full duplex (bit 3 set) */
+		assert(snmp_hw_duplex(3, &dup) && dup == 3 && smi_reads == smi0 + 2);
+		link_register = 0x00000100; /* MAC8 SFP up */
+		sfp_speed_register = 4; /* 10G */
+		smi0 = smi_reads;
+		assert(snmp_hw_duplex(8, &dup) && dup == 3 && smi_reads == smi0);
+		assert(!snmp_hw_duplex(9, &dup));
+		/* Temperature: positive, zero, negative and INT16_MIN (no signed overflow). */
+		temp_reg = 6362;
+		assert(snmp_hw_temp(&temp) && temp == 497);
+		temp_reg = 0;
+		assert(snmp_hw_temp(&temp) && temp == 0);
+		temp_reg = -1600;
+		assert(snmp_hw_temp(&temp) && temp == -125);
+		temp_reg = -32768;
+		assert(snmp_hw_temp(&temp) && temp == -2560);
+		/* SFP DDM read edge. */
+		sfp_ddm_val[0][224] = 0x2a80;
+		assert(snmp_hw_sfp_ddm(0, 224, &raw) && raw == 0x2a80);
+		assert(!snmp_hw_sfp_ddm(1, 224, &raw));
+		sfp_ddm_fail = true;
+		assert(!snmp_hw_sfp_ddm(0, 224, &raw));
+		sfp_ddm_fail = false;
+	}
 	link_register = 0x00080000;
 	speed_register = 5u << 12;
 	puts("PASS dirty XDATA startup, GUI byte mapping, all MACs, SFP, down/100M/1G/2.5G and "

@@ -46,29 +46,54 @@ broadcast source addresses, except /31 and /32 point-to-point/host cases.
 
 GET, GETNEXT and GETBULK expose the following read-only objects:
 
-- system: sysDescr.0, sysUpTime.0, sysContact.0 (empty), sysName.0 and
-  sysLocation.0 (empty). sysUpTime is Counter32-width TimeTicks in centiseconds.
-- ifNumber.0; ifTable columns ifIndex, ifDescr, ifType, ifSpeed, ifAdminStatus,
-  ifOperStatus, ifInOctets, ifInUcastPkts, ifInErrors, ifOutOctets,
-  ifOutUcastPkts and ifOutErrors.
-- ifXTable: ifName, ifInMulticastPkts, ifInBroadcastPkts, ifOutMulticastPkts,
-  ifOutBroadcastPkts, ifHCInOctets, ifHCInUcastPkts, ifHCInMulticastPkts,
-  ifHCInBroadcastPkts, ifHCOutOctets, ifHCOutUcastPkts,
-  ifHCOutMulticastPkts, ifHCOutBroadcastPkts, ifHighSpeed and ifAlias.
+- LLDP-MIB (`1.0.8802.1.1.2.1`): `lldpLocalSystemData` scalars
+  (`lldpLocChassisIdSubtype`, `lldpLocChassisId`, `lldpLocSysName`,
+  `lldpLocSysDesc`, `lldpLocSysCapSupported`, `lldpLocSysCapEnabled`),
+  `lldpLocPortTable` (`lldpLocPortIdSubtype`, `lldpLocPortId`, `lldpLocPortDesc`),
+  `lldpRemTable` (`lldpRemChassisIdSubtype`, `lldpRemChassisId`,
+  `lldpRemPortIdSubtype`, `lldpRemPortId`, `lldpRemPortDesc`, `lldpRemSysName`,
+  `lldpRemSysCapSupported`, `lldpRemSysCapEnabled`) and `lldpRemManAddrTable`
+  (`lldpRemManAddrIfSubtype`, `lldpRemManAddrIfId`) for live IPv4 management
+  addresses in `lldp_nb[]`.
+- SNMPv2-MIB system: `sysDescr.0`, `sysObjectID.0` (`1.3.6.1.3.8373.1` or
+  `1.3.6.1.3.8372.1` under experimental, borrowing no vendor PEN), `sysUpTime.0`,
+  `sysContact.0` (empty), `sysName.0`, `sysLocation.0` (empty) and
+  `sysServices.0` (2, layer-2 bridge/switch). `sysUpTime` is Counter32-width
+  TimeTicks in centiseconds.
+- IF-MIB: `ifNumber.0`; `ifTable` columns `ifIndex`, `ifDescr`, `ifType`,
+  `ifMtu`, `ifSpeed`, `ifPhysAddress`, `ifAdminStatus`, `ifOperStatus`,
+  `ifInOctets`, `ifInUcastPkts`, `ifInErrors`, `ifOutOctets`, `ifOutUcastPkts`
+  and `ifOutErrors`.
+- EtherLike-MIB (`1.3.6.1.2.1.10.7.2.1.19`): `dot3StatsDuplexStatus`
+  (`unknown(1)` when link down, `halfDuplex(2)`, `fullDuplex(3)`).
+- IF-MIB `ifXTable`: `ifName`, `ifInMulticastPkts`, `ifInBroadcastPkts`,
+  `ifOutMulticastPkts`, `ifOutBroadcastPkts`, `ifHCInOctets`, `ifHCInUcastPkts`,
+  `ifHCInMulticastPkts`, `ifHCInBroadcastPkts`, `ifHCOutOctets`,
+  `ifHCOutUcastPkts`, `ifHCOutMulticastPkts`, `ifHCOutBroadcastPkts`,
+  `ifHighSpeed`, `ifConnectorPresent` and `ifAlias`.
+- ENTITY-MIB (`1.3.6.1.2.1.47.1.1.1.1`): `entPhysicalTable` columns `Descr`,
+  `ContainedIn`, `Class`, `ParentRelPos`, `Name`, `HardwareRev`, `FirmwareRev`,
+  `SerialNum`, `MfgName`, `ModelName` and `IsFRU` for Chassis (1), ASIC
+  Temperature sensor (2), present SFP+ transceiver modules (10/20) and
+  internally calibrated SFF-8472 DDM sensors (11..15 / 21..25).
+- ENTITY-SENSOR-MIB (`1.3.6.1.2.1.99.1.1.1`): `entPhySensorTable` columns
+  `Type`, `Scale`, `Precision`, `Value`, `OperStatus` and `UnitsDisplay` for
+  ASIC die temperature (0.1 C) and internally calibrated SFP+ DDM sensors
+  (Temperature in 0.1 C, Vcc in 0.0001 V, TxBias in uA, TxPower/RxPower in
+  0.1 uW).
 
 Octet/unicast ifTable counters use Counter32; native high-capacity counters use
 Counter64. Speeds are Gauge32 (ifSpeed in bit/s, saturating at UINT32_MAX;
 ifHighSpeed in Mbit/s). A down/unknown-speed port retains both speed rows with
-zero values. Hardware read failures return genErr rather than fabricated zeros.
-Indices identify actual front-panel ports, including SFP, without a CPU row.
-ifAdminStatus reads the copper PHY power-down bit, independently of link state.
-SFP ports are administratively up because this firmware has no SFP disable
-operation. ifAlias is the configured port name, or an empty string. Error
-counters use the RX/TX 32-bit halves of hardware selector 48, not a synthetic
-64-bit extension. MTU, discards and per-port MAC are not exposed.
-
-sysObjectID remains unsupported pending an authoritative RTLPlayground PEN/OID
-from the upstream maintainer. No vendor's enterprise namespace is borrowed.
+zero values. Hardware read failures return genErr rather than fabricated zeros
+(SFP I2C DDM read errors report `unavailable(2)` in `entPhySensorOperStatus`
+and 0 in `entPhySensorValue` so a misbehaving module does not abort a full MIB
+walk). Indices identify actual front-panel ports, including SFP, without a CPU
+row. ifAdminStatus reads the copper PHY power-down bit, independently of link
+state. SFP ports are administratively up because this firmware has no SFP
+disable operation. ifAlias is the configured port name, or an empty string.
+Error counters use the RX/TX 32-bit halves of hardware selector 48, not a
+synthetic 64-bit extension. Discards are not exposed.
 SET, SNMPv3, notifications and writable system strings are unsupported.
 Requests are limited to 484 bytes, eight stored varbinds and 32 OID arcs.
 Authenticated, well-formed requests with more than eight varbinds receive

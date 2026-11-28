@@ -313,8 +313,8 @@ int main(void)
 	      "wire GET returns real sysName");
 	snmp_uptime = 0x80000000;
 	fixture(wire_getnext, sizeof(wire_getnext));
-	CHECK(result_type[0] == 0x43 && result_len[0] == 5 && names[0][6] == 3,
-	      "wire GETNEXT advances to TimeTicks");
+	CHECK(result_type[0] == ASN_OBJECT_ID && result_len[0] == 7 && names[0][6] == 2,
+	      "wire GETNEXT advances to sysObjectID");
 	/* Leave a complete old packet in storage, but report a shorter new frame. */
 	load(wire_get, sizeof(wire_get));
 	uip_len--;
@@ -393,7 +393,7 @@ int main(void)
 	raw_payload(huge, sizeof(huge), 40001, 161, source);
 	load(packet, packet_len);
 	drop("485-byte SNMP datagram dropped");
-	query_oid(2, 4, 1);
+	query_oid(2, 13, 1);
 	make_request(0xa0, 1);
 	raw_payload(req, req_len, 40001, 161, source);
 	load(packet, packet_len);
@@ -457,7 +457,10 @@ int main(void)
 	hw_failed = false;
 	CHECK(response_error == 5 && response_index == 1 && result_type[0] == 5,
 	      "wire hardware failure returns genErr with original binding");
-	query_oid(31, 18, MACHINE_MAX_PORT + 1);
+	{
+		const uint16_t end_oid[] = {1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 6, 2};
+		query_arcs(end_oid, 12);
+	}
 	make_request(0xa1, 1);
 	raw_payload(req, req_len, 40001, 161, source);
 	load(packet, packet_len);

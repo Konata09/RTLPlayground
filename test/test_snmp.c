@@ -5,6 +5,8 @@
 #undef main
 #undef udp_callbacks
 #include "machine.h"
+#include "sfp.h"
+#include "rtl837x_lldp.h"
 #include "snmp.h"
 #include <assert.h>
 #include "snmp_hw.h"
@@ -28,6 +30,14 @@ extern const struct machine machine;
 #endif
 char hostname[24] = "host-agent";
 char port_names[9][PORT_NAME_SIZE];
+__attribute__((weak)) struct uip_eth_addr uip_ethaddr = {
+    .addr = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01}};
+uint8_t sfp_pins_last = 0x33;
+uint8_t sfp_options[2];
+char sfp_module_vendor[2][17];
+char sfp_module_model[2][17];
+char sfp_module_serial[2][17];
+struct lldp_neighbor lldp_nb[LLDP_NB_MAX];
 static uint8_t admin_state = 1;
 extern volatile uint32_t snmp_uptime;
 static unsigned hw_calls;
@@ -82,6 +92,39 @@ bool snmp_hw_speed(uint8_t port, uint16_t *v)
 	*v = measured_speed;
 	return !hw_failed && (!hw_fail_at || hw_calls != hw_fail_at);
 }
+static uint16_t measured_mtu = 1522;
+bool snmp_hw_mtu(uint8_t port, uint16_t *mtu)
+{
+	hw_calls++;
+	last_port = port;
+	*mtu = measured_mtu;
+	return !hw_failed;
+}
+static uint8_t measured_duplex = 3;
+bool snmp_hw_duplex(uint8_t port, uint8_t *duplex)
+{
+	hw_calls++;
+	last_port = port;
+	*duplex = measured_duplex;
+	return !hw_failed;
+}
+static int16_t measured_temp = 497;
+bool snmp_hw_temp(int16_t *deci_c)
+{
+	hw_calls++;
+	*deci_c = measured_temp;
+	return !hw_failed;
+}
+static uint16_t measured_sfp_ddm[2][256];
+static bool sfp_ddm_failed;
+bool snmp_hw_sfp_ddm(uint8_t sfp, uint8_t reg, uint16_t *raw)
+{
+	hw_calls++;
+	if (sfp >= machine.n_sfp || sfp_ddm_failed)
+		return false;
+	*raw = measured_sfp_ddm[sfp][reg];
+	return true;
+}
 #ifndef SNMP_TRANSPORT_TEST
 void udp_callbacks(void)
 {
@@ -128,6 +171,58 @@ static void query_oid(uint8_t group, uint8_t column, uint8_t index)
 		input_oid[9] = index;
 		input_oid_len = 10;
 	}
+}
+static void query_arcs(const uint16_t *a, uint8_t n)
+{
+	uint8_t p = 0;
+	assert(n >= 2);
+	uint16_t first = (uint16_t)(a[0] * 40u + a[1]);
+	if (first >= 128)
+		input_oid[p++] = (uint8_t)((first >> 7) | 0x80);
+	input_oid[p++] = (uint8_t)(first & 0x7f);
+	for (uint8_t i = 2; i < n; i++) {
+		uint16_t v = a[i];
+		if (v >= 16384)
+			input_oid[p++] = (uint8_t)((v >> 14) | 0x80);
+		if (v >= 128)
+			input_oid[p++] = (uint8_t)(((v >> 7) & 0x7f) | 0x80);
+		input_oid[p++] = (uint8_t)(v & 0x7f);
+	}
+	input_oid_len = p;
+}
+static unsigned decode_oid_arcs(const uint8_t *buf, uint8_t len, uint32_t *out, unsigned cap)
+{
+	unsigned c = 0;
+	uint32_t v = 0;
+	bool first = true;
+	for (uint8_t i = 0; i < len; i++) {
+		v = (v << 7) | (buf[i] & 0x7f);
+		if (!(buf[i] & 0x80)) {
+			if (first) {
+				uint32_t a0 = v < 40 ? 0 : v < 80 ? 1 : 2;
+				assert(c + 2 <= cap);
+				out[c++] = a0;
+				out[c++] = v - (a0 == 0 ? 0 : a0 == 1 ? 40 : 80);
+				first = false;
+			} else {
+				assert(c < cap);
+				out[c++] = v;
+			}
+			v = 0;
+		}
+	}
+	return c;
+}
+static int cmp_arcs(const uint32_t *a, unsigned na, const uint32_t *b, unsigned nb)
+{
+	unsigned n = na < nb ? na : nb;
+	for (unsigned i = 0; i < n; i++) {
+		if (a[i] < b[i])
+			return -1;
+		if (a[i] > b[i])
+			return 1;
+	}
+	return na < nb ? -1 : na > nb ? 1 : 0;
 }
 static void make_request(uint8_t pdu_type, unsigned bindings)
 {
@@ -277,12 +372,12 @@ static size_t put_int(uint8_t *d, int32_t v)
 		s++;
 	return put_tlv(d, ASN_INTEGER, b + s, 4 - s);
 }
-static uint8_t bulk_oid[8][12], bulk_oid_len[8];
+static uint8_t bulk_oid[8][28], bulk_oid_len[8];
 static unsigned bulk_count;
 static size_t bulk_comm, bulk_pdu, bulk_first;
 static void bulk_add_oid(const uint8_t *o, uint8_t n)
 {
-	assert(bulk_count < 8 && n <= 12);
+	assert(bulk_count < 8 && n <= 28);
 	memcpy(bulk_oid[bulk_count], o, n);
 	bulk_oid_len[bulk_count++] = n;
 }
@@ -335,8 +430,8 @@ static void append_list(const uint8_t *t, size_t n)
 	req_len += n;
 }
 /* Whole-MIB reference built from single GETNEXT requests. */
-#define REF_MAX 300
-static uint8_t ref_name[REF_MAX][12], ref_name_len[REF_MAX], ref_type[REF_MAX],
+#define REF_MAX 600
+static uint8_t ref_name[REF_MAX][28], ref_name_len[REF_MAX], ref_type[REF_MAX],
     ref_val[REF_MAX][96], ref_val_len[REF_MAX];
 static unsigned ref_count;
 static void build_reference(void)
@@ -353,7 +448,7 @@ static void build_reference(void)
 		assert(!response_error);
 		if (result_type[0] == SNMP_END_OF_MIB)
 			break;
-		assert(ref_count < REF_MAX && name_len[0] <= 12 && result_len[0] < 96);
+		assert(ref_count < REF_MAX && name_len[0] <= 28 && result_len[0] < 96);
 		memcpy(ref_name[ref_count], names[0], name_len[0]);
 		ref_name_len[ref_count] = name_len[0];
 		ref_type[ref_count] = result_type[0];
@@ -508,7 +603,17 @@ int main(void)
 	query_oid(1, 2, 0);
 	make_request(0xa0, 1);
 	execute();
-	CHECK(result_type[0] == 0x80, "sysObjectID pending authoritative upstream PEN");
+	{
+		const uint8_t exp_oid[] = {43, 6, 1, 3, 0xc1, 0x34, 1};
+		CHECK(result_type[0] == ASN_OBJECT_ID && result_len[0] == sizeof(exp_oid) &&
+			  !memcmp(result_data[0], exp_oid, sizeof(exp_oid)),
+		      "sysObjectID returns experimental RTL8372 OID");
+	}
+	query_oid(1, 7, 0);
+	make_request(0xa0, 1);
+	execute();
+	CHECK(result_type[0] == ASN_INTEGER && result_len[0] == 1 && result_data[0][0] == 2,
+	      "sysServices reports layer-2 switch");
 	query_oid(1, 3, 0);
 	make_request(0xa0, 1);
 	snmp_uptime = 0x80000000;
@@ -584,7 +689,8 @@ int main(void)
 	query_oid(31, 18, MACHINE_MAX_PORT + 1);
 	make_request(0xa1, 1);
 	execute();
-	CHECK(result_type[0] == 0x82, "GETNEXT ends after last interface alias");
+	CHECK(!response_error && names[0][5] == 47,
+	      "GETNEXT crosses from ifXTable into ENTITY-MIB");
 	measured_speed = 2500;
 	query_oid(2, 5, 8);
 	make_request(0xa0, 1);
@@ -683,12 +789,55 @@ int main(void)
 		      last_selector == (col < 4 ? col + 1 : col + 2),
 		      "32-bit multicast and broadcast counters use native selectors");
 	}
-	for (unsigned col = 4; col <= 6; col += 2) {
+	query_oid(2, 4, 8);
+	make_request(0xa0, 1);
+	execute();
+	CHECK(!response_error && result_type[0] == ASN_INTEGER && result_len[0] == 2 &&
+		  result_data[0][0] == (1522 >> 8) && result_data[0][1] == (1522 & 0xff),
+	      "ifMtu returns hardware port max frame length");
+	hw_failed = true;
+	execute();
+	CHECK(response_error == SNMP_ERR_GEN_ERR, "ifMtu hardware failure returns genErr");
+	hw_failed = false;
+	query_oid(2, 6, 8);
+	make_request(0xa0, 1);
+	execute();
+	CHECK(!response_error && result_type[0] == ASN_OCTET_STRING && result_len[0] == 6 &&
+		  !memcmp(result_data[0], uip_ethaddr.addr, 6),
+	      "ifPhysAddress returns switch management MAC");
+	query_oid(31, 17, 8); /* logical 0 is SFP, n_sfp == 0 -> absent (2) */
+	make_request(0xa0, 1);
+	execute();
+	CHECK(!response_error && result_type[0] == ASN_INTEGER && result_data[0][0] == 2,
+	      "ifConnectorPresent false for absent SFP");
+	query_oid(31, 17, 1); /* copper port -> present (1) */
+	make_request(0xa0, 1);
+	execute();
+	CHECK(!response_error && result_type[0] == ASN_INTEGER && result_data[0][0] == 1,
+	      "ifConnectorPresent true for copper RJ45 port");
+	{
+		const uint16_t dup_oid[] = {1, 3, 6, 1, 2, 1, 10, 7, 2, 1, 19, 1};
+		query_arcs(dup_oid, 12);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(!response_error && result_type[0] == ASN_INTEGER && result_data[0][0] == 3,
+		      "EtherLike-MIB dot3StatsDuplexStatus fullDuplex");
+		measured_duplex = 2;
+		execute();
+		CHECK(!response_error && result_type[0] == ASN_INTEGER && result_data[0][0] == 2,
+		      "EtherLike-MIB dot3StatsDuplexStatus halfDuplex");
+		measured_duplex = 3;
+		hw_failed = true;
+		execute();
+		CHECK(response_error == SNMP_ERR_GEN_ERR, "dot3StatsDuplexStatus failure returns genErr");
+		hw_failed = false;
+	}
+	for (unsigned col = 9; col <= 13; col += 4) {
 		query_oid(2, col, 8);
 		make_request(0xa0, 1);
 		execute();
 		CHECK(!response_error && result_type[0] == 0x80,
-		      "ifMtu/ifPhysAddress unsupported measurements");
+		      "ifLastChange/ifInDiscards remain unsupported");
 	}
 	query_oid(2, 3, 8);
 	make_request(0xa0, 1);
@@ -708,7 +857,7 @@ int main(void)
 	make_request(0xa0, 1);
 	execute();
 	CHECK(result_type[0] == 0x81, "CPU not enumerated as max_port+1");
-	query_oid(2, 4, 1);
+	query_oid(2, 13, 1);
 	make_request(0xa0, 1);
 	execute();
 	CHECK(result_type[0] == 0x80, "unsupported measurement noSuchObject");
@@ -716,16 +865,23 @@ int main(void)
 	make_request(0xa0, 1);
 	execute();
 	CHECK(result_type[0] == 0x81, "scalar noSuchInstance");
-	query_oid(31, 18, MACHINE_MAX_PORT + 1);
-	make_request(0xa1, 1);
-	execute();
-	CHECK(result_type[0] == 0x82, "endOfMibView preserves requested OID");
-	CHECK(name_len[0] == input_oid_len && !memcmp(names[0], input_oid, input_oid_len),
-	      "exception original OID");
+	{
+		const uint16_t last_oid[] = {1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 6, 2};
+		query_arcs(last_oid, 12);
+		make_request(0xa1, 1);
+		execute();
+		CHECK(result_type[0] == 0x82, "endOfMibView preserves requested OID");
+		CHECK(name_len[0] == input_oid_len && !memcmp(names[0], input_oid, input_oid_len),
+		      "exception original OID");
+	}
 	query_oid(1, 1, 0);
 	make_request(0xa1, 1);
 	execute();
-	CHECK(names[0][6] == 3, "GETNEXT scalar ordering");
+	CHECK(names[0][6] == 2, "GETNEXT scalar ordering to sysObjectID");
+	query_oid(1, 2, 0);
+	make_request(0xa1, 1);
+	execute();
+	CHECK(names[0][6] == 3, "GETNEXT scalar ordering to sysUpTime");
 	query_oid(2, 1, MACHINE_MAX_PORT + 1);
 	make_request(0xa1, 1);
 	execute();
@@ -744,7 +900,7 @@ int main(void)
 	input_oid_len = 11;
 	make_request(0xa1, 1);
 	execute();
-	CHECK(names[0][5] == 31, "OID numeric rather than BER byte ordering");
+	CHECK(names[0][5] == 10, "OID numeric rather than BER byte ordering");
 	query_oid(1, 5, 0);
 	make_request(0xa0, 1);
 	query_oid(2, 2, 8);
@@ -963,11 +1119,11 @@ int main(void)
 		memcpy(input_oid, names[0], name_len[0]);
 		input_oid_len = name_len[0];
 	}
-	CHECK(walked == 6u + 27u * (MACHINE_MAX_PORT + 1u) && result_type[0] == 0x82,
+	CHECK(walked == 36u + 31u * (MACHINE_MAX_PORT + 1u) && result_type[0] == 0x82,
 	      "complete MIB walk and endOfMibView unchanged by status reads");
 	/* RFC 3416 GETBULK against the actual MIB order. */
 	build_reference();
-	CHECK(ref_count == 6u + 27u * (MACHINE_MAX_PORT + 1u), "GETBULK reference covers whole MIB");
+	CHECK(ref_count == 36u + 31u * (MACHINE_MAX_PORT + 1u), "GETBULK reference covers whole MIB");
 	{
 		int s[3];
 		unsigned hw;
@@ -1161,6 +1317,189 @@ int main(void)
 			ok &= !snmp_process(req, req_len, source);
 			CHECK(ok, labels[t]);
 		}
+	}
+
+	/* Extension 2: ENTITY-MIB and ENTITY-SENSOR-MIB (chassis + ASIC die temperature). */
+	{
+		const uint16_t ch_cls[] = {1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 5, 1};
+		const uint16_t ch_rel[] = {1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 6, 1};
+		const uint16_t ch_mfg[] = {1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 12, 1};
+		const uint16_t ch_fru[] = {1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 16, 1};
+		const uint16_t asic_val[] = {1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 4, 2};
+		const uint16_t asic_unit[] = {1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 6, 2};
+		query_arcs(ch_cls, 13);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_data[0][0] == 3, "chassis entPhysicalClass=3");
+		query_arcs(ch_rel, 13);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_len[0] == 1 && result_data[0][0] == 0xff,
+		      "chassis entPhysicalParentRelPos=-1");
+		query_arcs(ch_mfg, 13);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 13 &&
+			  !memcmp(result_data[0], "RTLPlayground", 13),
+		      "chassis entPhysicalMfgName");
+		query_arcs(ch_fru, 13);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_data[0][0] == 2, "chassis isFRU=false(2)");
+		measured_temp = 497;
+		query_arcs(asic_val, 12);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_len[0] == 2 &&
+			  result_data[0][0] == 0x01 && result_data[0][1] == 0xf1,
+		      "ASIC entPhySensorValue positive 49.7 C");
+		measured_temp = -125;
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_len[0] == 1 && result_data[0][0] == 0x83,
+		      "ASIC entPhySensorValue negative -12.5 C minimal signed BER");
+		measured_temp = -405;
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_len[0] == 2 &&
+			  result_data[0][0] == 0xfe && result_data[0][1] == 0x6b,
+		      "ASIC entPhySensorValue negative -40.5 C two-byte signed BER");
+		hw_failed = true;
+		execute();
+		CHECK(response_error == SNMP_ERR_GEN_ERR, "ASIC temp failure returns genErr");
+		hw_failed = false;
+		measured_temp = 497;
+		query_arcs(asic_unit, 12);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 1 && result_data[0][0] == 0x43,
+		      "ASIC entPhySensorUnitsDisplay=C");
+	}
+	/* Extension 3: LLDP-MIB local, empty-table noSuchInstance, populated remote & mgmt addr, full 1.0 walk. */
+	{
+		const uint16_t loc_mac[] = {1, 0, 8802, 1, 1, 2, 1, 3, 2, 0};
+		const uint16_t loc_cap[] = {1, 0, 8802, 1, 1, 2, 1, 3, 6, 0};
+		const uint16_t loc_pid[] = {1, 0, 8802, 1, 1, 2, 1, 3, 7, 1, 3, 8};
+		const uint16_t rem_empty[] = {1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9, 0, 8, 1};
+		const uint16_t rem_badcol[] = {1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 10, 0, 8, 1};
+		query_arcs(loc_mac, 10);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 6 &&
+			  !memcmp(result_data[0], uip_ethaddr.addr, 6),
+		      "lldpLocChassisId returns switch MAC");
+		query_arcs(loc_cap, 10);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 1 && result_data[0][0] == 0x20,
+		      "lldpLocSysCapEnabled SNMP BITS bridge(2)=0x20");
+		query_arcs(loc_pid, 12);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 6 &&
+			  !memcmp(result_data[0], "Port 8", 6),
+		      "lldpLocPortId matches wire Port <n>");
+		memset(lldp_nb, 0, sizeof(lldp_nb));
+		query_arcs(rem_empty, 14);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == SNMP_NO_SUCH_INSTANCE, "empty lldpRemTable returns noSuchInstance");
+		query_arcs(rem_badcol, 14);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == SNMP_NO_SUCH_OBJECT, "unsupported lldpRemSysDesc returns noSuchObject");
+
+		/* Populate 3 neighbors across two ports (incl. 2 neighbors on front-panel port 8 = logical 0). */
+		lldp_nb[0].port = 0;
+		lldp_nb[0].chassis_subtype = 4;
+		lldp_nb[0].chassis_len = 6;
+		memcpy(lldp_nb[0].chassis, (const uint8_t[]){0xdc, 0xda, 0x80, 0x49, 0x83, 0x6a}, 6);
+		lldp_nb[0].port_id_mac = 0;
+		strcpy(lldp_nb[0].port_id, "Ten-GigabitE");
+		strcpy(lldp_nb[0].port_desc, "Ten-GigabitEther");
+		strcpy(lldp_nb[0].sys_name, "S5500V2-34S-EI");
+		memcpy(lldp_nb[0].mgmt_addr, (const uint8_t[]){192, 168, 10, 251}, 4);
+		lldp_nb[0].caps = 0x0114; /* bridge + router + cVLAN -> BITS 0x28 0x80 */
+		lldp_nb[0].ttl = 110;
+
+		lldp_nb[1].port = 0;
+		lldp_nb[1].chassis_subtype = 4;
+		lldp_nb[1].chassis_len = 6;
+		memcpy(lldp_nb[1].chassis, (const uint8_t[]){0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, 6);
+		lldp_nb[1].port_id_mac = 1;
+		memcpy(lldp_nb[1].port_id, (const uint8_t[]){0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 6);
+		strcpy(lldp_nb[1].sys_name, "MAC-PEER");
+		lldp_nb[1].caps = 0x0004; /* bridge -> BITS 0x20 */
+		lldp_nb[1].ttl = 90;
+
+		lldp_nb[2].port = 7; /* front-panel port 1 */
+		lldp_nb[2].chassis_subtype = 4;
+		lldp_nb[2].chassis_len = 6;
+		memcpy(lldp_nb[2].chassis, (const uint8_t[]){0xf4, 0x52, 0x14, 0x39, 0x79, 0xa0}, 6);
+		strcpy(lldp_nb[2].port_id, "Eth1/11/2");
+		strcpy(lldp_nb[2].sys_name, "SX6012");
+		memcpy(lldp_nb[2].mgmt_addr, (const uint8_t[]){10, 0, 0, 1}, 4);
+		lldp_nb[2].caps = 0x0004;
+		lldp_nb[2].ttl = 96;
+
+		const uint16_t rem_sys[] = {1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9, 0, 8, 1};
+		const uint16_t rem_caps[] = {1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 12, 0, 8, 1};
+		const uint16_t rem_macsub[] = {1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 6, 0, 8, 2};
+		const uint16_t rem_macpid[] = {1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 7, 0, 8, 2};
+		const uint16_t rem_man[] = {1, 0, 8802, 1, 1, 2, 1, 4, 2, 1, 3, 0, 8, 1, 1, 4, 192, 168, 10, 251};
+		query_arcs(rem_sys, 14);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 14 &&
+			  !memcmp(result_data[0], "S5500V2-34S-EI", 14),
+		      "lldpRemSysName neighbor 1 on port 8");
+		query_arcs(rem_caps, 14);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 2 &&
+			  result_data[0][0] == 0x28 && result_data[0][1] == 0x80,
+		      "lldpRemSysCapEnabled 2-byte SNMP BITS reversal");
+		query_arcs(rem_macsub, 14);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_data[0][0] == 3,
+		      "lldpRemPortIdSubtype=3 for MAC port ID");
+		query_arcs(rem_macpid, 14);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_OCTET_STRING && result_len[0] == 6 &&
+			  result_data[0][0] == 0xaa && result_data[0][5] == 0xff,
+		      "lldpRemPortId raw 6-byte MAC");
+		query_arcs(rem_man, 20);
+		make_request(0xa0, 1);
+		execute();
+		CHECK(result_type[0] == ASN_INTEGER && result_data[0][0] == 1,
+		      "lldpRemManAddrIfSubtype 20-arc IPv4 OID");
+
+		/* Full tree walk from 1.0 verifying strict numerical OID monotonicity across all 11 sections. */
+		input_oid[0] = 40; /* 1.0 */
+		input_oid_len = 1;
+		uint32_t prev[32], curr[32];
+		unsigned prev_n = 0, full_n = 0;
+		bool monotonic = true;
+		for (; full_n < REF_MAX; full_n++) {
+			make_request(SNMP_PDU_GETNEXT, 1);
+			execute();
+			assert(!response_error);
+			if (result_type[0] == SNMP_END_OF_MIB)
+				break;
+			unsigned curr_n = decode_oid_arcs(names[0], name_len[0], curr, 32);
+			if (prev_n && cmp_arcs(prev, prev_n, curr, curr_n) >= 0)
+				monotonic = false;
+			memcpy(prev, curr, curr_n * sizeof(uint32_t));
+			prev_n = curr_n;
+			memcpy(input_oid, names[0], name_len[0]);
+			input_oid_len = name_len[0];
+		}
+		/* Expected: 6 lldpLoc + 3*P lldpLocPort + 8*3 lldpRem + 2*2 lldpRemMan + (36 + 31*P) mib-2. */
+		unsigned expected_full = 6u + 3u * (MACHINE_MAX_PORT + 1u) + 24u + 4u +
+					 36u + 31u * (MACHINE_MAX_PORT + 1u);
+		CHECK(monotonic && full_n == expected_full && result_type[0] == SNMP_END_OF_MIB,
+		      "full 1.0..endOfMibView walk is strictly monotonic with exact count");
+		memset(lldp_nb, 0, sizeof(lldp_nb));
 	}
 	query_oid(1, 5, 0);
 	make_request(0xa0, 1);

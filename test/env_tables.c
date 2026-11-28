@@ -18,6 +18,7 @@
 #include "rtl837x_phy.h"
 #include <test/support.h>
 #include "rtl837x_lacp.h"
+#include "rtl837x_lldp.h"
 
 /* ---- console: everything lands in out_buf (support.c) ---- */
 void print_byte(uint8_t v)
@@ -91,6 +92,7 @@ bool     stp_enabled;
 bool lldp_enabled;
 __attribute__((weak)) uint16_t lldp_logical_port_status;
 __attribute__((weak)) uint16_t lldp_rx_port_status = 0xffff;
+__attribute__((weak)) struct lldp_neighbor lldp_nb[LLDP_NB_MAX];
 
 
 uip_ipaddr_t uip_hostaddr, uip_draddr, uip_netmask;

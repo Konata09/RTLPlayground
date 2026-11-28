@@ -19,6 +19,14 @@ bool snmp_hw_link(uint8_t port, __xdata uint32_t *__xdata value) __banked;
 bool snmp_hw_speed(uint8_t port, __xdata uint16_t *__xdata mbps) __banked;
 /* ifAdminStatus: 1 up, 2 down. Copper reads PHY MMD31.a610 bit 11; SFP is always up. */
 bool snmp_hw_admin(uint8_t port, __xdata uint8_t *__xdata state) __banked;
+/* ifMtu: per-port L2 maximum frame length register masked to 14 bits. */
+bool snmp_hw_mtu(uint8_t port, __xdata uint16_t *__xdata mtu) __banked;
+/* dot3StatsDuplexStatus: 1 unknown (link down), 2 halfDuplex, 3 fullDuplex. */
+bool snmp_hw_duplex(uint8_t port, __xdata uint8_t *__xdata duplex) __banked;
+/* ASIC die temperature in tenths of a degree Celsius (0.1 C). */
+bool snmp_hw_temp(__xdata int16_t *__xdata deci_c) __banked;
+/* Raw big-endian 16-bit SFF-8472 DDM register (224..232) for SFP slot 0..1. */
+bool snmp_hw_sfp_ddm(uint8_t sfp, __xdata uint8_t reg, __xdata uint16_t *__xdata raw) __banked;
 /* A timed-out statistics request refuses further requests, without touching the
  * engine, until the SFR engine and STAT_GET are both observed idle; the next
  * counter request then recovers. A failed request never alters the caller's counter. */

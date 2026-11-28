@@ -1,6 +1,7 @@
 #include "rtl837x_common.h"
 #include "rtl837x_sfr.h"
 #include "rtl837x_regs.h"
+#include "phy.h"
 #include "machine.h"
 #include "snmp_hw.h"
 
@@ -21,18 +22,18 @@ void snmp_hw_init(void) __banked
 /* The host edge models SFR command completion, including a stuck engine. */
 #ifdef RTLP_HOST_TEST
 extern void snmp_hw_command(uint16_t reg, uint8_t command);
+extern bool snmp_hw_sfp_read(uint8_t sfp, uint8_t reg, uint16_t *raw);
 #endif
-static bool access(uint16_t reg, uint8_t command)
+static bool access(uint16_t reg, __xdata uint8_t command)
 {
-	/* An external MDIO transaction takes longer than an ASIC register access. */
-	__xdata uint16_t budget = command == SFR_EXEC_READ_SMI ? 4096 : 64;
-	/* Never replace a command still in flight. */
-	if (fault || SFR_EXEC_STATUS)
+	uint16_t budget = 512;
+	if (SFR_EXEC_STATUS)
 		return false;
-	SFR_REG_ADDR_U16 = reg;
-	SFR_EXEC_GO = command;
 #ifdef RTLP_HOST_TEST
 	snmp_hw_command(reg, command);
+#else
+	SFR_REG_ADDR_U16 = reg;
+	SFR_EXEC_GO = command;
 #endif
 	do {
 		if (!SFR_EXEC_STATUS)
@@ -225,4 +226,70 @@ bool snmp_hw_speed(uint8_t port, __xdata uint16_t *__xdata mbps) __banked
 		break;
 	}
 	return true;
+}
+
+bool snmp_hw_mtu(uint8_t port, __xdata uint16_t *__xdata mtu) __banked
+{
+	if (!user_port(port) || !stat_ready() ||
+	    !access(RTL8373_REG_MAC_L2_PORT_MAX_LEN + ((uint16_t)port << 8), SFR_EXEC_READ_REG))
+		return false;
+	*mtu = (((uint16_t)SFR_DATA_8 << 8) | SFR_DATA_0) & 0x3fff;
+	return true;
+}
+
+/* dot3StatsDuplexStatus: 1 unknown, 2 halfDuplex, 3 fullDuplex. */
+bool snmp_hw_duplex(uint8_t port, __xdata uint8_t *__xdata duplex) __banked
+{
+	__xdata uint16_t mbps;
+	if (!snmp_hw_speed(port, &mbps))
+		return false;
+	if (!mbps) {
+		*duplex = 1;
+		return true;
+	}
+	if (machine.is_sfp[port] || mbps >= 2500) {
+		*duplex = 3;
+		return true;
+	}
+	if (!stat_ready())
+		return false;
+	SFR_SMI_REG_U16 = PHY_MMD31_PHYSR;
+	SFR_SMI_PHY = port;
+	SFR_SMI_DEV = (uint8_t)((31U << 3) | 2U);
+	if (!access(PHY_MMD31_PHYSR, SFR_EXEC_READ_SMI))
+		return false;
+	*duplex = (SFR_DATA_0 & 0x08) ? 3 : 2;
+	return true;
+}
+
+/* ASIC thermal sensor RTL837X_TM_RESULT is signed 16-bit in 1/128 deg C. */
+bool snmp_hw_temp(__xdata int16_t *__xdata deci_c) __banked
+{
+	__xdata int16_t raw;
+	__xdata uint16_t mag;
+	if (!stat_ready() || !access(RTL837X_TM_RESULT, SFR_EXEC_READ_REG))
+		return false;
+	raw = (int16_t)(((uint16_t)SFR_DATA_8 << 8) | SFR_DATA_0);
+	if (raw < 0) {
+		mag = (uint16_t)(-(int32_t)raw);
+		*deci_c = -(int16_t)(((uint32_t)mag * 10UL) >> 7);
+	} else {
+		mag = (uint16_t)raw;
+		*deci_c = (int16_t)(((uint32_t)mag * 10UL) >> 7);
+	}
+	return true;
+}
+
+bool snmp_hw_sfp_ddm(uint8_t sfp, __xdata uint8_t reg, __xdata uint16_t *__xdata raw) __banked
+{
+	if (sfp >= machine.n_sfp)
+		return false;
+#ifdef RTLP_HOST_TEST
+	return snmp_hw_sfp_read(sfp, reg, raw);
+#else
+	if (!stat_ready() || !sfp_read_block(sfp, reg, 2))
+		return false;
+	*raw = ((uint16_t)sfp_buf[0] << 8) | sfp_buf[1];
+	return true;
+#endif
 }
