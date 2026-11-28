@@ -27,6 +27,12 @@
     English, Japanese and Chinese, save to flash merges the command log into the startup config and verifies the write,
     firmware images are checked in the browser before upload. #429
 
+- LLDP
+  - Receive LLDPDUs and maintain a per-port capped neighbour table (chassis ID subtypes,
+    port ID/description, system name, management IPv4, capabilities, PVID, MTU/LAG mismatch
+    warnings, TTL ageing, last-seen age, per-port counters, syslog events, and per-port
+    `listen|ignore` control), exposed via `lldp show|counters`, `/lldp.json`, Dashboard
+    neighbour count, Ports tab tooltip and the LLDP Web UI tab. #589 #592 #593 #594 #595 #596 #598 #601 #602 #603 #604 #605
 - SNMP
   - Bounded GETBULK walks, interface administrative state, aliases, error counters
     and 32-bit multicast/broadcast counters for the optional read-only agent.

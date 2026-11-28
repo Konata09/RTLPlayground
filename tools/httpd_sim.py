@@ -712,14 +712,42 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _api_lldp(self):
         return {
-            "on": True,
+            "on": state["lldp_enabled"],
             "portStatus": [
                 {
                     "port": i,
                     "name": "",
                     "permitted": True,
+                    "listening": True,
                 }
                 for i in range(1, PORTS + 1)
+            ],
+            "counters": [
+                {
+                    "port": i,
+                    "tx": i * 7,
+                    "rx": 5 if i == 3 else 0,
+                    "discarded": 0,
+                    "ageouts": 0,
+                }
+                for i in range(1, PORTS + 1)
+            ],
+            "neighbors": [
+                {
+                    "port": 3,
+                    "chassis": "00:11:22:33:44:55",
+                    "portId": "eth0",
+                    "sysName": "desk-pc",
+                    "portDesc": "onboard nic",
+                    "mgmtAddr": "10.0.0.7",
+                    "caps": 128,
+                    "pvid": 20,
+                    "mtu": 1518,
+                    "agg": 1,
+                    "warn": 3,
+                    "ttl": 117,
+                    "age": 3,
+                }
             ],
         }
 
@@ -815,7 +843,8 @@ class Handler(SimpleHTTPRequestHandler):
             "sw_ver":"0.1-sim",
             "uptime":f"0x{int(time.time()) - started:08x}",
             "hw_ver":"SWGT024-V2.0",
-            "pcb_ver":"PCB_SWTG024AS_A_V2_0_1_19650"
+            "pcb_ver":"PCB_SWTG024AS_A_V2_0_1_19650",
+            "lldp_neighbors": 1
         }
 
     def _api_debug(self):

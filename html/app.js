@@ -73,6 +73,7 @@ var LANG = {
         i_temp: "Temperature",
         i_flash: "Flash",
         i_syslog: "Syslog",
+        i_lldp: "LLDP neighbours",
         p_state: "State",
         p_disabled: "disabled",
         p_up: "up",
@@ -148,6 +149,7 @@ var LANG = {
         lldp_title: "Service Status",
         lldp_portname: "Name",
         lldp_enable: "Send Frames",
+        lldp_listen: "Receive",
         stp_pcs: "Path cost",
         stp_pcs_long: "Long (32 bit)",
         stp_pcs_short: "Short (16 bit)",
@@ -167,6 +169,27 @@ var LANG = {
         stp_ctrx: "TC received",
         stp_cttx: "TC sent",
         stp_cage: "Last BPDU [s]",
+        lldp_c_tx: "TX",
+        lldp_c_rx: "RX",
+        lldp_c_disc: "Discarded",
+        lldp_c_age: "Age-outs",
+        lldp_nb_title: "Neighbours",
+        lldp_nb_chassis: "Chassis ID",
+        lldp_nb_portid: "Port ID",
+        lldp_nb_sysname: "System Name",
+        lldp_nb_portdesc: "Port Description",
+        lldp_nb_addr: "Address",
+        lldp_nb_caps: "Capabilities",
+        lldp_nb_pvid: "PVID",
+        lldp_nb_mtu: "MTU",
+        lldp_nb_lag: "LAG",
+        lldp_nb_warn: "Warnings",
+        lldp_w_mtu: "MTU larger than ours",
+        lldp_w_lag: "LAG only on one side",
+        lldp_w_dup: "same neighbour on another port",
+        lldp_nb_ttl: "TTL",
+        lldp_nb_seen: "Last seen",
+        lldp_s_ago: "{s} s ago",
         st_title: "Port statistics",
         st_h: "totals since boot",
         st_txg: "TX good",
@@ -843,6 +866,28 @@ var LANG = {
         lldp_title: "服务状态",
         lldp_portname: "名称",
         lldp_enable: "发送帧",
+        lldp_listen: "接收",
+        lldp_c_tx: "发送",
+        lldp_c_rx: "接收",
+        lldp_c_disc: "丢弃",
+        lldp_c_age: "老化",
+        lldp_nb_title: "邻居",
+        lldp_nb_chassis: "机箱 ID",
+        lldp_nb_portid: "端口 ID",
+        lldp_nb_sysname: "系统名称",
+        lldp_nb_portdesc: "端口描述",
+        lldp_nb_addr: "管理地址",
+        lldp_nb_caps: "能力",
+        lldp_nb_pvid: "PVID",
+        lldp_nb_mtu: "MTU",
+        lldp_nb_lag: "LAG",
+        lldp_nb_warn: "警告",
+        lldp_w_mtu: "对端 MTU 大于本端",
+        lldp_w_lag: "仅单侧启用 LAG",
+        lldp_w_dup: "另一端口发现相同邻居",
+        lldp_nb_ttl: "TTL",
+        lldp_nb_seen: "最近发现",
+        lldp_s_ago: "{s} 秒前",
         stp_pcs: "路径开销",
         stp_pcs_long: "长格式 (32 bit)",
         stp_pcs_short: "短格式 (16 bit)",
@@ -2392,7 +2437,7 @@ var CONF_CMDS = [
     /^ingress(\s+\d+[tua])+$/, /^ingress\s+[tua]$/,
     /^port\s+\d+\s+(10m|100m|1g|2g5|5g|10g|auto|on|off)(\s+(half|full))?$/,
     /^port\s+\d+\s+name(\s+\S+)?$/,
-    /^port\s+\d+\s+lldp\s+(permit|block)+$/,
+    /^port\s+\d+\s+lldp\s+(permit|block|listen|ignore)$/,
     /^eee\s+(on|off)(\s+\d+)?(\s+(100m|1g|2g5))?$/,
     /^mirror(\s+\d+)(\s+\d+[tr]?)+$/, /^mirror\s+off$/,
     /^lag\s+[1-4](\s+\d+)+$/, /^lag\s+[1-4]\s+d$/,
@@ -2920,7 +2965,8 @@ function renderInfo() {
         ["i_pcb", "pcb_ver"],
         ["i_temp", "chip_temp"],
         ["i_flash", "flash_size"],
-        ["i_syslog", "syslog_server"]
+        ["i_syslog", "syslog_server"],
+        ["i_lldp", "lldp_neighbors"]
     ];
     var tb = $("sysinfo");
     tb.innerHTML = "";
@@ -3115,11 +3161,32 @@ function applyPort(i) {
     }
     postCmds(cmds).catch(function() {});
 }
+var lldpTipT = 0;
+
+function portsLldp() {
+    lldpTipT = Date.now();
+    return getJSON("/lldp.json").then(function(s) {
+        var tip = {};
+        (s.neighbors || []).forEach(function(n) {
+            tip[n.port] = (tip[n.port] ? tip[n.port] + "\n" : "") + (n.sysName || n.chassis) + " (" + n.portId + ")";
+        });
+        S.ports.forEach(function(p) {
+            var el = $("plink" + (p.port - 1));
+            if (el) el.title = tip[p.port] ? "LLDP: " + tip[p.port] : "";
+        });
+    }).catch(function() {});
+}
 tabHooks.ports = {
     enter: function() {
-        needPorts(buildPorts)
+        needPorts(function() {
+            buildPorts();
+            portsLldp();
+        });
     },
-    status: portsStatus,
+    status: function() {
+        portsStatus();
+        if (Date.now() - lldpTipT > 30000) portsLldp();
+    },
 };
 
 var STP_PF = {
@@ -4483,11 +4550,34 @@ tabHooks.lag = {
     }
 };
 
+var LLDP_CAPS = [
+    [1, "Other"],
+    [2, "Repeater"],
+    [4, "Bridge"],
+    [8, "WLAN AP"],
+    [16, "Router"],
+    [32, "Telephone"],
+    [64, "DOCSIS"],
+    [128, "Station"]
+];
+
+function lldpCaps(c) {
+    return LLDP_CAPS.filter(function(x) {
+        return c & x[0];
+    }).map(function(x) {
+        return x[1];
+    }).join(", ");
+}
+
 function lldpLoad() {
     return getJSON("/lldp.json").then(function(s) {
         $("lldp_en").checked = s.on;
         var tb = $("lldp_table").tBodies[0];
         tb.innerHTML = "";
+        var cnt = {};
+        (s.counters || []).forEach(function(c) {
+            cnt[c.port] = c;
+        });
         byPort(s.portStatus).forEach(function(p) {
             var tr = tb.insertRow();
             tr.insertCell().textContent = p.port;
@@ -4500,13 +4590,70 @@ function lldpLoad() {
                     onchange: function() {
                         postCmd("port " + p.port + " lldp " + (this.checked ? "permit" : "block"))
                             .then(function() {
-                                setTimeout(lldpLoad, 300)
+                                setTimeout(lldpLoad, 300);
                             }).catch(function() {});
                     }
                 }), h("i")
             ]);
             sw.firstChild.checked = p.permitted;
             tr.insertCell().appendChild(sw);
+            var rx = h("label", {
+                class: "switch"
+            }, [
+                h("input", {
+                    type: "checkbox",
+                    onchange: function() {
+                        postCmd("port " + p.port + " lldp " + (this.checked ? "listen" : "ignore"))
+                            .then(function() {
+                                setTimeout(lldpLoad, 300);
+                            }).catch(function() {});
+                    }
+                }), h("i")
+            ]);
+            rx.firstChild.checked = p.listening !== false;
+            tr.insertCell().appendChild(rx);
+            var c = cnt[p.port] || {};
+            ["tx", "rx", "discarded", "ageouts"].forEach(function(k) {
+                tr.insertCell().textContent = c[k] == null ? "-" : c[k];
+            });
+        });
+        var nb = $("lldp_nb_table").tBodies[0];
+        nb.innerHTML = "";
+        (s.neighbors || []).sort(function(a, b) {
+            return a.port - b.port;
+        }).forEach(function(n) {
+            var tr = nb.insertRow();
+            tr.insertCell().textContent = n.port;
+            tr.insertCell().textContent = n.chassis;
+            tr.insertCell().textContent = n.portId;
+            tr.insertCell().textContent = n.sysName;
+            tr.insertCell().textContent = n.portDesc || "";
+            var ac = tr.insertCell();
+            if (n.mgmtAddr) ac.appendChild(h("a", {
+                href: "http://" + n.mgmtAddr,
+                target: "_blank",
+                rel: "noopener",
+                text: n.mgmtAddr
+            }));
+            tr.insertCell().textContent = lldpCaps(n.caps);
+            tr.insertCell().textContent = n.pvid || "-";
+            tr.insertCell().textContent = n.mtu || "-";
+            tr.insertCell().textContent = n.agg ? (n.agg === 2 ? t("c_yes") : t("c_no")) : "-";
+            var wc = tr.insertCell();
+            [
+                [1, "lldp_w_mtu"],
+                [2, "lldp_w_lag"],
+                [4, "lldp_w_dup"]
+            ].forEach(function(w) {
+                if (n.warn & w[0]) wc.appendChild(h("span", {
+                    class: "badge bad",
+                    text: t(w[1])
+                }));
+            });
+            tr.insertCell().textContent = n.ttl;
+            tr.insertCell().textContent = t("lldp_s_ago", {
+                s: n.age
+            });
         });
     });
 }
@@ -4514,11 +4661,17 @@ function lldpLoad() {
 $("lldp_en").addEventListener("change", function() {
     var el = this;
     postCmd("lldp " + (el.checked ? "on" : "off")).catch(function() {
-        el.checked = !el.checked
+        el.checked = !el.checked;
     });
 });
+var lldpPoller = new Poller(lldpLoad, 5000);
 tabHooks.lldp = {
-    enter: lldpLoad
+    enter: function() {
+        lldpPoller.start();
+    },
+    leave: function() {
+        lldpPoller.stop();
+    }
 };
 
 function eeeLoad() {
@@ -5252,8 +5405,8 @@ function mergeConf(base, texts) {
                 drop(/^mirror /);
                 return;
             }
-            if ((m = line.match(/^(port \d{1,2} lldp) (permit|block)$/))) {
-                drop(new RegExp("^" + m[1] + " (permit|block)$"));
+            if ((m = line.match(/^(port \d{1,2} lldp) (permit|block|listen|ignore)$/))) {
+                drop(new RegExp("^" + m[1] + " (" + (m[2] === "listen" || m[2] === "ignore" ? "listen|ignore" : "permit|block") + ")$"));
                 conf.push(line);
                 return;
             }

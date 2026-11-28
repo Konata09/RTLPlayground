@@ -55,7 +55,7 @@ extern __xdata char sfp_module_model[2][17];
 extern __xdata char sfp_module_serial[2][17];
 extern __xdata uint8_t sfp_options[2];
 
-extern __xdata uint16_t lldp_logical_port_status;
+#include "rtl837x_lldp.h"
 extern __xdata bool lldp_enabled;
 
 
@@ -250,7 +250,9 @@ void send_basic_info(void)
 	str_code_to_html(machine.machine_name);
 	str_code_to_html("\"," JSONQUOTE("pcb_ver") ":\"");
 	str_code_to_html(MACHINE_PCB_INFO);
-	str_code_to_html("\"," JSONQUOTE("chip_temp") ":\"");
+	str_code_to_html("\"," JSONQUOTE("lldp_neighbors") ":");
+	itoa_html(lldp_neighbor_count());
+	str_code_to_html("," JSONQUOTE("chip_temp") ":\"");
 	temp_to_html();
 	str_code_to_html("\"," JSONQUOTE("flash_size") ":\"");
 	str_code_to_html(get_flash_size_str());
@@ -681,12 +683,16 @@ void send_lldp(void)
 
 		str_code_to_html("\"," JSONQUOTE("permitted") ":");
 		bool_to_json(1 & (lldp_logical_port_status >> i));
+		str_code_to_html("," JSONQUOTE("listening") ":");
+		bool_to_json(1 & (lldp_rx_port_status >> i));
 		char_to_html('}');
 
 		if (i < MACHINE_MAX_PORT)
 			char_to_html(',');
 	}
 	char_to_html(']');
+	lldp_counters_to_html();
+	lldp_neighbors_to_html();
 	char_to_html('}');
 }
 
