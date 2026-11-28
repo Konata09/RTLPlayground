@@ -20,8 +20,8 @@ __code const struct machine machine = {
 	.led_sets = {
 		{	/* Ports 1-5 (RJ45): Link/Act + speed matrix */
 			LEDS_2G5 | LEDS_1G | LEDS_100M | LEDS_10M | LEDS_LINK | LEDS_ACT,
-			LEDS_2G5 | LEDS_LINK,
 			LEDS_1G | LEDS_LINK,
+			LEDS_2G5 | LEDS_LINK,
 			0
 		},
 		{	/* Port 6 (SFP+) */
