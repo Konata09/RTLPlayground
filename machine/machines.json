@@ -70,6 +70,16 @@
     "pcb": "RTL_4GT_2XGT_SE_V1_01"
   },
   {
+    "machine": "HASIVO_S1100W_8GT_1SX_SE",
+    "friendly_name": "Hasivo S1100W-8GT-1SX-SE",
+    "pcb": "HASIVO_S1100W_8GT_1SX_SE"
+  },
+  {
+    "machine": "HASIVO_S600W_5GT_1SX_S",
+    "friendly_name": "Hasivo S600W-5GT-1SX-S",
+    "pcb": "HASIVO_S600W_5GT_1SX_S"
+  },
+  {
     "machine": "HISOURCE_HI_K0402WS_V2_0",
     "friendly_name": "Hisource Hi-K0402WS",
     "pcb": "PCB_K0402W_V2_0"
