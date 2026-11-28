@@ -1,3 +1,4 @@
+.DEFAULT_GOAL := all
 # Host unit-test harness for RTLPlayground firmware logic.
 #
 # Compiles selected firmware translation units with host gcc + AddressSanitizer,
@@ -14,12 +15,17 @@ SRCROOT  = ..
 CFLAGS   = -std=gnu11 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unknown-pragmas \
            -Wno-pointer-sign \
            -DRTLP_HOST_TEST \
-           -fsanitize=address,undefined -fno-omit-frame-pointer \
-           -include sdcc_shim.h -Istub -I$(SRCROOT) -I$(SRCROOT)/httpd -I$(SRCROOT)/uip
+           -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+           -include sdcc_shim.h -Istub -I. -I$(SRCROOT) -I$(SRCROOT)/httpd -I$(SRCROOT)/uip -I$(SRCROOT)/machine
 ifeq ($(findstring clang,$(shell $(CC) --version 2>/dev/null)),)
 CFLAGS  += -Wno-builtin-declaration-mismatch
 endif
 LDFLAGS  = -fsanitize=address,undefined
+GC_LDFLAGS := $(shell printf 'int main(void){return 0;}\n' | $(CC) -x c - -o /dev/null -Wl,--gc-sections >/dev/null 2>&1 && printf '%s' '-Wl,--gc-sections')
+ifeq ($(GC_LDFLAGS),)
+GC_LDFLAGS := $(shell printf 'int main(void){return 0;}\n' | $(CC) -x c - -o /dev/null -Wl,-dead_strip >/dev/null 2>&1 && printf '%s' '-Wl,-dead_strip')
+endif
+GC_CFLAGS := $(shell printf 'int main(void){return 0;}\n' | $(CC) -Werror -ffunction-sections -fdata-sections -x c - -c -o /dev/null >/dev/null 2>&1 && printf '%s' '-ffunction-sections -fdata-sections')
 
 BUILDDIR = build
 
@@ -36,7 +42,8 @@ TESTS = $(BUILDDIR)/test_cmd_editor \
         $(BUILDDIR)/test_cpu_vlan_8372 \
         $(BUILDDIR)/test_nic_rx \
         $(BUILDDIR)/test_lacp \
-        $(BUILDDIR)/test_igmp
+        $(BUILDDIR)/test_igmp \
+        $(BUILDDIR)/test_rx_bounds
 
 # The table tests link the register mock and one environment file; stub/
 # stands in for the two headers a firmware build generates.
@@ -72,8 +79,11 @@ $(BUILDDIR)/test_timer: test_timer.c support.c $(SRCROOT)/cmd_editor.c $(SRCROOT
 
 # Exercise the production RX ring reader; only the hardware DMA edge is mocked.
 # Discard unused TX functions so this RX fixture needs no TX register mocks.
+$(BUILDDIR)/test_rx_bounds: test_rx_bounds.c $(SRCROOT)/uip/uip_rx.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 $(BUILDDIR)/test_nic_rx: test_nic_rx.c $(SRCROOT)/rtl837x_nic.c $(SRCROOT)/rtl837x_nic.h | $(BUILDDIR)
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(filter %.c,$^) -o $@ $(LDFLAGS) -Wl,--gc-sections
+	$(CC) $(CFLAGS) $(GC_CFLAGS) $(filter %.c,$^) -o $@ $(LDFLAGS) $(GC_LDFLAGS)
 
 $(BUILDDIR)/test_page_json: test_page_json.c $(TABLE_ENV) hw_mock.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LDFLAGS)
@@ -98,7 +108,7 @@ $(BUILDDIR)/test_cpu_vlan_8372: CFLAGS += -DMACHINE_MAX_PORT=7 -DMACHINE_MIN_POR
 $(BUILDDIR)/test_cpu_vlan_full $(BUILDDIR)/test_cpu_vlan_restricted $(BUILDDIR)/test_cpu_vlan_8372: test_cpu_vlan.c $(TABLE_ENV) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LDFLAGS)
 
-run: $(TESTS)
+run: bank-audit-unit $(TESTS) snmp snmp-horaco-profile snmp-status snmp-cli snmp-replay config-replay
 	@fail=0; for t in $(TESTS); do \
 		echo "=== $$t ==="; \
 		$$t || fail=1; \
@@ -111,3 +121,116 @@ clean:
 	$(MAKE) -C stp clean
 
 .PHONY: all run stp clean
+
+# SNMP host benches compile the same firmware sources; listener is opt-in here.
+SNMPFLAGS = $(CFLAGS) -DSNMP
+SNMPENV = $(SRCROOT)/snmp.c $(SRCROOT)/snmp_control.c $(SRCROOT)/uip/uip.c $(SRCROOT)/httpd/httpd.c $(SRCROOT)/sessions.c $(SRCROOT)/timer.c
+$(BUILDDIR)/test_snmp: test_snmp.c test_httpd_tx.c $(SNMPENV) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DMACHINE_MAX_PORT=7 test_snmp.c $(SNMPENV) -o $@ $(LDFLAGS)
+
+$(BUILDDIR)/test_snmp_hw: test_snmp_hw.c $(SRCROOT)/snmp_hw.c | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) test_snmp_hw.c -o $@ $(LDFLAGS)
+
+$(BUILDDIR)/test_snmp_nine: test_snmp.c test_httpd_tx.c $(SNMPENV) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DSNMP_TEST_NINE test_snmp.c $(SNMPENV) -o $@ $(LDFLAGS)
+
+$(BUILDDIR)/test_snmp_hw_six: test_snmp_hw.c $(SRCROOT)/snmp_hw.c | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DSNMP_HW_SIX -DMACHINE_MIN_PORT=3 test_snmp_hw.c -o $@ $(LDFLAGS)
+
+.PHONY: snmp snmp-unit
+snmp-unit: $(BUILDDIR)/test_snmp $(BUILDDIR)/test_snmp_nine $(BUILDDIR)/test_snmp_hw $(BUILDDIR)/test_snmp_hw_six $(BUILDDIR)/test_snmp_hw_cpu_bound
+	$(BUILDDIR)/test_snmp
+	$(BUILDDIR)/test_snmp_nine
+	$(BUILDDIR)/test_snmp_hw
+	$(BUILDDIR)/test_snmp_hw selector
+	$(BUILDDIR)/test_snmp_hw prebusy
+	$(BUILDDIR)/test_snmp_hw link
+	$(BUILDDIR)/test_snmp_hw speed
+	$(BUILDDIR)/test_snmp_hw admin
+	$(BUILDDIR)/test_snmp_hw_six
+	$(BUILDDIR)/test_snmp_hw_cpu_bound
+
+# Exercise the actual dispatcher, ARP module and UDP service implementations.
+TRANSPORTDEPS = $(SRCROOT)/syslog.c $(SRCROOT)/dhcp.c $(SRCROOT)/uip/uip_arp.c $(SRCROOT)/snmp.h
+TRANSPORTENV = $(SNMPENV) $(SRCROOT)/udp_apps.c transport_arp.c \
+               transport_dhcp.c $(SRCROOT)/dns.c $(SRCROOT)/ntp.c transport_syslog.c
+$(BUILDDIR)/test_snmp_transport: test_snmp_transport.c test_snmp.c test_httpd_tx.c snmp_wire_fixtures.h $(TRANSPORTENV) $(TRANSPORTDEPS) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DMACHINE_MAX_PORT=7 $(GC_CFLAGS) test_snmp_transport.c $(TRANSPORTENV) -o $@ $(LDFLAGS) $(GC_LDFLAGS)
+$(BUILDDIR)/test_snmp_transport_nine: test_snmp_transport.c test_snmp.c test_httpd_tx.c snmp_wire_fixtures.h $(TRANSPORTENV) $(TRANSPORTDEPS) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DSNMP_TEST_NINE $(GC_CFLAGS) test_snmp_transport.c $(TRANSPORTENV) -o $@ $(LDFLAGS) $(GC_LDFLAGS)
+snmp: snmp-unit $(BUILDDIR)/test_snmp_transport $(BUILDDIR)/test_snmp_transport_nine
+	$(BUILDDIR)/test_snmp_transport
+	$(BUILDDIR)/test_snmp_transport_nine
+
+# Real HORACO profile compatibility; all hardware access is mocked.
+HORACO_PCB = $(SRCROOT)/machine/pcb/PCB_SWTG118AS_V2_0_16029.c
+HORACO_FLAGS = -DMACHINE_CHIPSET=RTL8373 -DFRIENDLY_NAME='"Horaco HC-SWTGW218AS"' -DMACHINE_PCB_NAME=PCB_SWTG118AS_V2_0_16029
+$(BUILDDIR)/test_snmp_horaco_profile: test_snmp_horaco_profile.c test_snmp.c test_httpd_tx.c $(SNMPENV) $(HORACO_PCB) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) $(HORACO_FLAGS) test_snmp_horaco_profile.c $(SNMPENV) $(HORACO_PCB) -o $@ $(LDFLAGS)
+.PHONY: snmp-horaco-profile
+snmp-horaco-profile: $(BUILDDIR)/test_snmp_horaco_profile snmp-port-map
+	$(BUILDDIR)/test_snmp_horaco_profile
+
+# Stage C: actual runtime snapshot and information.json serialization.
+$(BUILDDIR)/test_snmp_status_json: test_snmp_status_json.c test_page_json.c $(TABLE_ENV) $(SRCROOT)/snmp.c $(SRCROOT)/snmp_control.c | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) $(GC_CFLAGS) $(filter-out test_page_json.c,$(filter %.c,$^)) -o $@ $(LDFLAGS) $(GC_LDFLAGS)
+.PHONY: snmp-status
+snmp-status: $(BUILDDIR)/test_snmp_status_json
+	$(BUILDDIR)/test_snmp_status_json
+
+NODE ?= node
+.PHONY: snmp-status-gui
+snmp-status-gui:
+	cd $(SRCROOT) && $(NODE) test/test_snmp_status_gui.cjs
+
+# Live community/ACL and timestamp behavior with the real packet engine.
+$(BUILDDIR)/test_snmp_cli: test_snmp_cli.c test_snmp.c test_httpd_tx.c $(SNMPENV) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DMACHINE_MAX_PORT=7 test_snmp_cli.c $(SNMPENV) -o $@ $(LDFLAGS)
+.PHONY: snmp-cli
+snmp-cli: $(BUILDDIR)/test_snmp_cli
+	$(BUILDDIR)/test_snmp_cli
+
+# Preserve the full SNMP suites as an explicit CI entry point.
+.PHONY: snmp-all snmp-replay snmp-gui
+snmp-all: snmp snmp-horaco-profile snmp-status snmp-cli snmp-replay snmp-gui
+snmp-replay:
+	cd $(SRCROOT) && REPLAY_CC="$(CC)" python3 test/test_snmp_control_replay.py
+snmp-gui:
+	cd $(SRCROOT) && $(NODE) test/test_snmp_status_gui.cjs
+	cd $(SRCROOT) && $(NODE) test/test_snmp_switch_gui.cjs
+	cd $(SRCROOT) && $(NODE) test/test_snmp_switch_save.cjs
+	cd $(SRCROOT) && $(NODE) test/test_snmp_privacy_gui.cjs
+	cd $(SRCROOT) && $(NODE) test/test_snmp_full_page.cjs
+
+$(addprefix $(BUILDDIR)/,test_snmp test_snmp_nine test_snmp_horaco_profile test_snmp_status_json test_snmp_cli test_snmp_transport test_snmp_transport_nine): snmp_setup.h $(SRCROOT)/snmp_internal.h $(SRCROOT)/snmp.h
+
+.PHONY: config-replay
+config-replay:
+	cd $(SRCROOT) && CC="$(CC)" python3 test/test_config_replay.py
+
+# Compile the real six-port profile with its chipset bounds, plus a restricted
+# test-only bound to prove enumeration does not assume the chipset default.
+KP6_PCB = $(SRCROOT)/machine/pcb/2M_PCB43_V1_1.c
+KP6_FLAGS = -DMACHINE_CHIPSET=RTL8372 -DFRIENDLY_NAME='"keepLiNK KP-9000-6XHML-X2"' -DMACHINE_PCB_NAME=2M_PCB43_V1_1
+$(BUILDDIR)/test_snmp_port_map: test_snmp_port_map.c test_snmp.c test_httpd_tx.c $(SNMPENV) $(KP6_PCB) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) $(KP6_FLAGS) $(filter-out test_snmp.c test_httpd_tx.c,$(filter %.c,$^)) -o $@ $(LDFLAGS)
+
+$(BUILDDIR)/test_snmp_port_map_restricted: test_snmp_port_map.c test_snmp.c test_httpd_tx.c $(SNMPENV) $(KP6_PCB) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) $(KP6_FLAGS) -DMACHINE_MAX_PORT=6 -DSNMP_MAP_RESTRICTED $(filter-out test_snmp.c test_httpd_tx.c,$(filter %.c,$^)) -o $@ $(LDFLAGS)
+
+.PHONY: snmp-port-map
+snmp-port-map: $(BUILDDIR)/test_snmp_port_map $(BUILDDIR)/test_snmp_port_map_restricted $(BUILDDIR)/test_snmp_port_map_cpu_bound
+	$(BUILDDIR)/test_snmp_port_map
+	$(BUILDDIR)/test_snmp_port_map_restricted
+	$(BUILDDIR)/test_snmp_port_map_cpu_bound
+
+# A test-only profile range reaching CPU_LOGICAL_PORT must still exclude the CPU MAC.
+$(BUILDDIR)/test_snmp_port_map_cpu_bound: test_snmp_port_map.c test_snmp.c test_httpd_tx.c $(SNMPENV) $(KP6_PCB) | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) $(KP6_FLAGS) -DMACHINE_MAX_PORT=CPU_LOGICAL_PORT $(filter-out test_snmp.c test_httpd_tx.c,$(filter %.c,$^)) -o $@ $(LDFLAGS)
+
+$(BUILDDIR)/test_snmp_hw_cpu_bound: test_snmp_hw.c $(SRCROOT)/snmp_hw.c | $(BUILDDIR)
+	$(CC) $(SNMPFLAGS) -DMACHINE_MAX_PORT=CPU_LOGICAL_PORT test_snmp_hw.c -o $@ $(LDFLAGS)
+
+.PHONY: bank-audit-unit
+bank-audit-unit:
+	python3 test_banked_calls.py
